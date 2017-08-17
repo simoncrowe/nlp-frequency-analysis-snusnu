@@ -1,22 +1,16 @@
 #!/usr/bin/env python3
-
-# Local
-from snusnu.element_ids import AMAZON_UK_URL
-import snusnu.data as data
-import snusnu.browse_products as browse_products
-from snusnu.helpers import yes_no_input_prompt, int_input_prompt
-from snusnu.helpers import output_command_arguments
-
-# External
 import sys
-import nltk
 import string
-from selenium import webdriver
+
+import nltk
 from nltk.probability import FreqDist
 from nltk import tokenize
 from nltk.corpus import stopwords
 from nltk.corpus import treebank
 from nltk.tag import UnigramTagger
+from selenium import webdriver
+
+# DATA STRUCTURES USED FOR NATURAL LANGUAGE PROCESSING:
 
 ADDITIONAL_STOPS = ["it's", "i'm", "i'll", "i'd", "i've",
                     "it’s", "i’m", "i’ll", "i’d", "i’ve",
@@ -42,32 +36,57 @@ POS_TAGS = {'nouns':['NP', 'NX', 'NN', 'NNS', 'NNP', 'NNPS'],
             'miscellaneous words' : []} # The inclusion of 'misc words' is an
                                         # inelegant side-effect of an otherwise
                                         # elegant solution
-def frequency_analysis():
+
+def string_from_text_file(path):
+    try:
+        with open(path, 'r') as textfile:
+            return textfile.read()
+    except FileNotFoundError:
+        print('No file exists matching', path)
+
+def string_to_text_file(path, string):
+    with open(path, "w") as text_file:
+        text_file.write(string)
+
+def output_command_arguments(arg_descriptions):
+    print('These are the recognised command arguments:')
+    print(' {0:10}{1}'.format('NAME', 'DESCRIPTION'))
+    for a in arg_descriptions.keys():
+        print(' {0:10}{1}'.format(a, arg_descriptions[a]['description']))
+        print('   Required arguments:')
+        print(arg_descriptions[a]['required args'] + '\n')
+
+
+def get_words_simple(text_string):
     """
-    Performs simple frequency analysis with options for
-    minimum word length, number of words and parts-of-speech to be included.
+    Gets a list of tagged words from an input string
+    using whitespace-based tokenisation and a unigram PoS tagger
     """
     # get trained Unigram tagger
     print('Loading unigram tagger...')
     train_sents = treebank.tagged_sents()
     unigram_tagger = UnigramTagger(train_sents)
-
-    text_string = data.string_from_text_file(sys.argv[2]).lower()
-    # string.translate() takes a Dict as input.
-    # The Dict mapping ordinal chars to None is created in place:
+    # string.translate() takes a dictionary as input.
+    # The dictionary mapping ordinal chars to None is created in place:
     text_string = text_string.translate(
                   {ord(c): None for c in CHARS_TO_DELETE})
     words = text_string.split() # crude tokenisation, keeps contractions
     english_stops = stopwords.words('english')
-
     stops_set = set(english_stops + ADDITIONAL_STOPS)
     cleaned_words = []
     for w in words:
         if w not in stops_set and w not in string.punctuation:
             cleaned_words.append(w)
-    cleaned_words_tagged = unigram_tagger.tag(cleaned_words)
+    return unigram_tagger.tag(cleaned_words)
+
+def frequency_analysis():
+    """
+    Performs simple frequency analysis with options for
+    minimum word length, number of words and parts-of-speech to be included.
+    """
+    text_string = string_from_text_file(sys.argv[2]).lower()
+    cleaned_words = get_words_simple(text_string)
     fdist = FreqDist(cleaned_words)
-    #print(english_stops)
     prelim_results = ['\nFrequency analysis had found ']
     prelim_results.append(str(fdist.B()))
     prelim_results.append(' unique words of potential interest\n')
@@ -121,11 +140,11 @@ def frequency_analysis():
         word_string = []
         charcount = 0
         for w in selected_words:
-            charcount += (len(w[0]) + 2)
+            charcount += (len(w[0][0]) + 2)
             if charcount > 80:
                 word_string.append('\n')
                 charcount = 0
-            word_string.append(w[0])
+            word_string.append(w[0][0])
             word_string.append(', ')
         word_string[len(word_string) - 1] = '\n' # strip comma, add linebreak
         print(''.join(word_string))
@@ -179,7 +198,7 @@ def frequency_analysis():
                                     'one class of POS tags.')
                         print('Restarting selection...\n')
 
-            elif user_input == 'A' or user_input == 'a':
+            elif user_input.lower() == 'a' :
                 chosen = True
                 committed = True
             else:
@@ -192,7 +211,7 @@ def frequency_analysis():
         # Only choose words with POS tags
         # matching the classes in pos_tags_included:
         if not all_pos_tags_included:
-            for w in cleaned_words_tagged:
+            for w in cleaned_words:
                 word_included = False
                 for tag in pos_tags_included:
                     if pos_tags_included[tag]:
@@ -211,47 +230,10 @@ def frequency_analysis():
                 new_words.append(w)
 
         fdist = FreqDist(new_words)
-    print('Amazon search commands will now be made from the selected words.')
-    print('What action would you like snu-snu to perform with your words?')
-    for a in data.product_actions:
-        print('Enter ' + str(a) + ' below to ' + data.product_actions[a] + '.')
-
-    selected_product_action = 0
-    validated = False
-    while not validated:
-        selected_product_action = int_input_prompt('Please enter a number '
-                        + 'between 0 and ' + str(len(data.product_actions) - 1)
-                        + '...\n')
-        if 0 <= selected_product_action < len(data.product_actions):
-            validated = True
-    number_of_itmes = 1
-    if not selected_product_action == 0: # this is known to be search
-        validated  = False
-        while not validated:
-            number_of_items = int_input_prompt('How many items do you want '
-                                + 'the action to be carried out on?\n')
-            if number_of_items < 1:
-                print("Input error: there must be a positive number of items.")
-            else:
-                validated = True
-    print('You will now be asked to select a category in which to search...')
-    drv = webdriver.Chrome()
-    drv.get(AMAZON_UK_URL)
-    product_category = browse_products.choose_category(drv)
-
-    generated_commands = []
-    for w in selected_words:
-        generated_commands.append(data.ProductCommand(
-                                'NLP generated command',
-                                data.product_actions[selected_product_action],
-                                data.ProductAction(selected_product_action),
-                                product_category,
-                                w[0],
-                                number_of_items))
-    data.product_commands_to_file(generated_commands, sys.argv[3])
-    print('Commands sucessfully saved to ' + sys.argv[3])
+    words_string =  ', '.join([w[0][0] for w in selected_words])
+    string_to_text_file(sys.argv[3], words_string)
+    print('Words/phrases sucessfully saved to ' + sys.argv[3])
     quit()
-
 
 # Dictionary of dictionaries defining command arguments accepted by snu-snu
 ARGS = {'freq':
@@ -259,15 +241,14 @@ ARGS = {'freq':
     'required arg count' : 4,
     'required args' :
         '   1. The command (i.e. "freq") 2. path to source file '
-        + '(e.g. "in.txt")\n   3. path to destination file (eg. "out.json")',
+        + '(e.g. "in.txt")\n   3. path to destination file (eg. "out.txt")',
     'function' : frequency_analysis}}
 
 def initialise():
     """
     Checks arguments and calls appropriate functions.
     """
-    print("""This is text-process: a utility for generating commands for
- snu-snu from arbitrary texts using NLP.\n""")
+    print("""This is text-process: a utility for carring out NLP on texts.\n""")
 
     # Ensures that NLTK data can be stored in the same directory as code
     nltk.data.path.append('./nltk_data/')
