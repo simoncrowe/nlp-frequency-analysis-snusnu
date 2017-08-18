@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 import sys
 import string
+from enum import Enum
 
 import nltk
+from nltk import ngrams
+from nltk.tokenize import sent_tokenize, word_tokenize
 from nltk.probability import FreqDist
 from nltk import tokenize
 from nltk.corpus import stopwords
 from nltk.corpus import treebank
 from nltk.tag import UnigramTagger
+from nltk.tag.sequential import ClassifierBasedPOSTagger
 from selenium import webdriver
+
+from chunker import get_trained_classifier
 
 # DATA STRUCTURES USED FOR NATURAL LANGUAGE PROCESSING:
 
@@ -21,7 +27,7 @@ ADDITIONAL_STOPS = ["it's", "i'm", "i'll", "i'd", "i've",
                     "you're", "you'd", "you've",
                     "you’re", "you’d", "you’ve"]
 
-CHARS_TO_DELETE = '",.?:()[]<>~!–-•—“”“”…_'
+CHARS_TO_DELETE = '"'',.?:()[]<>~!–-•—“”“”…_'
 
 # The Dict keys in POS_TAGS match those used for
 # selecting/storing parts-of-speech in the functions below
@@ -36,6 +42,27 @@ POS_TAGS = {'nouns':['NP', 'NX', 'NN', 'NNS', 'NNP', 'NNPS'],
             'miscellaneous words' : []} # The inclusion of 'misc words' is an
                                         # inelegant side-effect of an otherwise
                                         # elegant solution
+
+class TokenisationMode(Enum):
+    WORDS = 1
+    CHUNKS = 2
+    NGRAMS = 3
+
+def is_int(value):
+    try:
+        int(value)
+        return True
+    except ValueError:
+        return False
+
+def int_input_prompt(message):
+    value_set = False
+    while not value_set:
+        new_value = input(message)
+        if is_int(new_value):
+            return int(new_value)
+        else:
+            print('Please enter an integer.')
 
 def string_from_text_file(path):
     try:
@@ -56,6 +83,34 @@ def output_command_arguments(arg_descriptions):
         print('   Required arguments:')
         print(arg_descriptions[a]['required args'] + '\n')
 
+def backoff_tagger(train_sents, tagger_classes, backoff=None):
+    for cls in tagger_classes:
+        backoff = cls(train_sents, backoff=backoff)
+    return backoff
+
+def get_chunks(text_string):
+    # tokenization
+    print('Tokenising text...')
+    sentences = sent_tokenize(text_string)
+    tokenized_sentences = []
+    for s in sentences:
+        tokenized_sentences.append(word_tokenize(s))
+    # PoS tagging
+    train_sents = treebank.tagged_sents()
+    print('Training PoS tagger...')
+    tagger = ClassifierBasedPOSTagger(train=train_sents)
+    tagged_sentences = []
+    print('Tagging sentences...')
+    for s in tokenized_sentences:
+        tagged_sentences.append(tagger.tag(s))
+    # chunking
+    print('Getting trained chunk classifier...')
+    chunk_classifier = get_trained_classifier()
+    chunked_sentences = []
+    print('Chunking sentences...')
+    for s in tagged_sentences:
+        chunked_sentences.append(chunk_classifier.parse(s))
+    return chunked_sentences
 
 def get_words_simple(text_string):
     """
@@ -66,6 +121,7 @@ def get_words_simple(text_string):
     print('Loading unigram tagger...')
     train_sents = treebank.tagged_sents()
     unigram_tagger = UnigramTagger(train_sents)
+    # stripping punctuation
     # string.translate() takes a dictionary as input.
     # The dictionary mapping ordinal chars to None is created in place:
     text_string = text_string.translate(
@@ -79,25 +135,62 @@ def get_words_simple(text_string):
             cleaned_words.append(w)
     return unigram_tagger.tag(cleaned_words)
 
-def frequency_analysis():
+def get_plain_chunks(chunked_sentences):
+    plain_chunks = []
+    for s in chunked_sentences:
+        for chunk in s:
+            words = []
+            for token in chunk:
+                words.append(token[0])
+            if len(words) > 0:
+                plain_chunks.append(' '.join(words))
+    return plain_chunks
+    
+def get_ngrams(text_string, n):
+    # stripping punctuation
+    # string.translate() takes a dictionary as input.
+    # The dictionary mapping ordinal chars to None is created in place:
+    text_string = text_string.translate(
+                  {ord(c): None for c in CHARS_TO_DELETE})
+    words  = text_string.split()
+    ngram_lists = ngrams(words, n)
+    ngram_strings = []
+    for n in ngram_lists:
+        ngram_strings.append(' '.join(n))
+    return ngram_strings
+   
+def choose_mode():
+    text_string = string_from_text_file(sys.argv[2])
+    print('\nHow do you want the text to be broken up for analysis?\n')
+    chosen = False
+    while not chosen:
+        print('Enter W for single words.')
+        print('Enter C for chunks.')
+        print('Enter N for ngrams.')
+        choice = input()
+        if choice.lower() == 'w':
+            words = get_words_simple(text_string.lower())
+            frequency_analysis(TokenisationMode.WORDS, words)
+        elif choice.lower() == 'c':
+            chunked_sents = get_chunks(text_string)
+            plain_chunks = get_plain_chunks(chunked_sents)
+            frequency_analysis(TokenisationMode.CHUNKS, plain_chunks)
+        elif choice.lower() == 'n':
+            n = int_input_prompt('How many words should make up each ngram?\n')
+            ngram_strings = get_ngrams(text_string, n)
+            frequency_analysis(TokenisationMode.NGRAMS, ngram_strings)
+        else:
+            print('Input not recognised, please try again.')
+
+def frequency_analysis(mode, tokens):
     """
     Performs simple frequency analysis with options for
     minimum word length, number of words and parts-of-speech to be included.
     """
-    text_string = string_from_text_file(sys.argv[2]).lower()
-    cleaned_words = get_words_simple(text_string)
-    fdist = FreqDist(cleaned_words)
-    prelim_results = ['\nFrequency analysis had found ']
-    prelim_results.append(str(fdist.B()))
-    prelim_results.append(' unique words of potential interest\n')
-    prelim_results.append('out of a total of ')
-    prelim_results.append(str(fdist.N()))
-    prelim_results.append('.')
-    print(''.join(prelim_results))
     # Variables for word selection
-    num_words = 100
-    min_word_length = 0
-    max_word_length = 16
+    num_tokens = 100
+    min_token_length = 3
+    max_token_length = 16
     all_pos_tags_included = True
     pos_tags_included =     {'untagged words' : True,
                             'nouns' : True,
@@ -110,62 +203,112 @@ def frequency_analysis():
 
     committed = False
     while not committed:
-        intro = ['The ']
-        intro.append(str(num_words))
-        intro.append(' most frequent words are currently selected.\n')
-        intro.append('Selected words are currently between ')
-        intro.append(str(min_word_length))
-        intro.append(' and ')
-        intro.append(str(max_word_length))
-        intro.append(' characters in length.\n')
-        if all_pos_tags_included:
-            intro.append('All parts-of-speech are included in the selection.\n')
+        #Determining words to use in new FreqDist
+        new_tokens = []
+        working_tokens = []
+        # Only choose words with POS tags
+        # matching the classes in pos_tags_included:
+        if not all_pos_tags_included:
+            for w in tokens:
+                word_included = False
+                for tag in pos_tags_included:
+                    if pos_tags_included[tag]:
+                        for t in POS_TAGS[tag]:
+                            if w[1] == t:
+                                #print(w[0] + ' matches ' + str(w[1]))
+                                working_tokens.append(w[0])
+                                word_included = True
+                if not word_included:
+                    if pos_tags_included['miscellaneous words']:
+                        working_tokens.append(w[0])
         else:
-            intro.append('Parts-of-speech included in the selection:\n')
-            for tag in pos_tags_included:
-                if pos_tags_included[tag]:
-                    intro.append(tag)
-                    intro.append(', ')
-            intro[len(intro) - 1] = '\n'# replace trailing comma with linebreak
-            intro.append('Parts-of-speech excluded from the selection:\n')
-            for tag in pos_tags_included:
-                if not pos_tags_included[tag]:
-                    intro.append(tag)
-                    intro.append(', ')
-            intro[len(intro) - 1] = '\n'# replace trailing comma with linebreak
+            working_tokens = tokens.copy()
+        print(working_tokens)
+        for w in working_tokens:
+            if mode == TokenisationMode.CHUNKS:
+                token = w
+            elif mode == TokenisationMode.NGRAMS:
+                token = w
+            elif mode == TokenisationMode.WORDS:
+                token = w[0]
+            if  min_token_length <= len(token) <= max_token_length:
+                new_tokens.append(token)
+
+        fdist = FreqDist(new_tokens)
+
+        prelim_results = ['\nFrequency analysis had found ']
+        prelim_results.append(str(fdist.B()))
+        prelim_results.append(' unique token of potential interest\n')
+        prelim_results.append('out of a total of ')
+        prelim_results.append(str(fdist.N()))
+        prelim_results.append('.')
+        print(''.join(prelim_results))
+        
+        intro = ['The ']
+        intro.append(str(num_tokens))
+        intro.append(' most frequent tokens are currently selected.\n')
+        intro.append('Selected words are currently between ')
+        intro.append(str(min_token_length))
+        intro.append(' and ')
+        intro.append(str(max_token_length))
+        intro.append(' characters in length.\n')
+        if not mode == TokenisationMode.NGRAMS:
+            if all_pos_tags_included:
+                intro.append('All parts-of-speech are included in the selection.\n')
+            else:
+                intro.append('Parts-of-speech included in the selection:\n')
+                for tag in pos_tags_included:
+                    if pos_tags_included[tag]:
+                        intro.append(tag)
+                        intro.append(', ')
+                intro[len(intro) - 1] = '\n'# replace trailing comma with linebreak
+                intro.append('Parts-of-speech excluded from the selection:\n')
+                for tag in pos_tags_included:
+                    if not pos_tags_included[tag]:
+                        intro.append(tag)
+                        intro.append(', ')
+                intro[len(intro) - 1] = '\n'# replace trailing comma with linebreak
 
         intro.append('Below are the selected words, most frequent first:\n')
         print(''.join(intro))
-        selected_words = fdist.most_common(num_words)
+        selected_tokens = fdist.most_common(num_tokens)
         word_string = []
         charcount = 0
-        for w in selected_words:
-            charcount += (len(w[0][0]) + 2)
+        print(selected_tokens)
+        for w in selected_tokens:            
+            if mode == TokenisationMode.CHUNKS:
+                token = w[0]
+            elif mode == TokenisationMode.NGRAMS:
+                token = w[0]
+            elif mode == TokenisationMode.WORDS:
+                token = w[0]
+            charcount += len(token) + 2
             if charcount > 80:
                 word_string.append('\n')
                 charcount = 0
-            word_string.append(w[0][0])
+            word_string.append(token)
             word_string.append(', ')
         word_string[len(word_string) - 1] = '\n' # strip comma, add linebreak
         print(''.join(word_string))
         chosen = False
         while not chosen:
-            print('Enter M below to change the minimum word length.')
-            print('Enter X below to change the maximum word length.')
-            print('Enter N to change the total number of words selected.')
-            print('Enter P to restrict selection with part-of-speech tagging.')
-            print('Enter A to accept the current list of words and continue.')
+            print('Enter M below to change the minimum token length.')
+            print('Enter X below to change the maximum token length.')
+            print('Enter N to change the total number of tokens selected.')
+            if not mode == TokenisationMode.NGRAMS:
+                print('Enter P to restrict selection with PoS tagging.')
+            print('Enter A to accept the current list of tokens and continue.')
             user_input = input()
             if user_input.lower()  == 'n':
-                num_words = int_input_prompt(
+                num_tokens = int_input_prompt(
                                   '\nHow many words do you want selected?\n')
                 chosen = True
             elif user_input.lower()  == 'm':
                 validated = False
                 while not validated:
-                    min_word_length = int_input_prompt(
+                    min_token_length = int_input_prompt(
                                     '\nEnter a new minimum word length...\n')
-                    if min_word_length > max_word_length:
+                    if min_token_length > max_token_length:
                         print("Minimum word length can't exceed maximum!")
                     else:
                         validated = True
@@ -173,76 +316,53 @@ def frequency_analysis():
             elif user_input.lower()  == 'x':
                 validated = False
                 while not validated:
-                    max_word_length = int_input_prompt(
+                    max_token_length = int_input_prompt(
                                     '\nEnter a new maximum word length...\n')
-                    if min_word_length > max_word_length:
+                    if mamin_token_length > max_token_length:
                         print("Maximum word length cannot be less than"
                                                         +   "minimum!")
                     else:
                         validated = True
                 chosen = True
             elif user_input.lower()  == 'p':
-                nothing_selected = True
-                while nothing_selected:
-                    for tag in pos_tags_included:
-                        print('Do you want to include ' + tag + '?')
-                        pos_tag_chosen = yes_no_input_prompt()
-                        pos_tags_included[tag] = pos_tag_chosen
-                        if pos_tag_chosen:
-                            chosen = True
-                            nothing_selected = False
-                        else:
-                            all_pos_tags_included = False
-                    if nothing_selected:
-                        print('Error: you must include at least ' +
-                                    'one class of POS tags.')
-                        print('Restarting selection...\n')
-
+                if not mode == TokenisationMode.NGRAMS:
+                    nothing_selected = True
+                    while nothing_selected:
+                        for tag in pos_tags_included:
+                            print('Do you want to include ' + tag + '?')
+                            pos_tag_chosen = yes_no_input_prompt()
+                            pos_tags_included[tag] = pos_tag_chosen
+                            if pos_tag_chosen:
+                                chosen = True
+                                nothing_selected = False
+                            else:
+                                all_pos_tags_included = False
+                        if nothing_selected:
+                            print('Error: you must include at least ' +
+                                        'one class of POS tags.')
+                            print('Restarting selection...\n')
+                else:
+                    print('PoS tagging not applicable to ngrams.')
+                    print('Doing nothing...')
             elif user_input.lower() == 'a' :
                 chosen = True
                 committed = True
             else:
                 print('Input not recognised')
 
-        #Determining words to use in new FreqDist
-        new_words = []
-        working_words = []
-
-        # Only choose words with POS tags
-        # matching the classes in pos_tags_included:
-        if not all_pos_tags_included:
-            for w in cleaned_words:
-                word_included = False
-                for tag in pos_tags_included:
-                    if pos_tags_included[tag]:
-                        for t in POS_TAGS[tag]:
-                            if w[1] == t:
-                                #print(w[0] + ' matches ' + str(w[1]))
-                                working_words.append(w[0])
-                                word_included = True
-                if not word_included:
-                    if pos_tags_included['miscellaneous words']:
-                        working_words.append(w[0])
-        else:
-            working_words = cleaned_words
-        for w in working_words:
-            if  min_word_length <= len(w) <= max_word_length:
-                new_words.append(w)
-
-        fdist = FreqDist(new_words)
-    words_string =  ', '.join([w[0][0] for w in selected_words])
+    words_string =  ', '.join([w[0][0] for w in selected_tokens])
     string_to_text_file(sys.argv[3], words_string)
     print('Words/phrases sucessfully saved to ' + sys.argv[3])
     quit()
 
 # Dictionary of dictionaries defining command arguments accepted by snu-snu
 ARGS = {'freq':
-    {'description':'derives commands from a text based on frequency analysis',
+    {'description':'carries out various forms of frequency analysis on texts.',
     'required arg count' : 4,
     'required args' :
         '   1. The command (i.e. "freq") 2. path to source file '
         + '(e.g. "in.txt")\n   3. path to destination file (eg. "out.txt")',
-    'function' : frequency_analysis}}
+    'function' : choose_mode}}
 
 def initialise():
     """
@@ -285,3 +405,5 @@ def initialise():
         quit()
 
 initialise()
+
+
